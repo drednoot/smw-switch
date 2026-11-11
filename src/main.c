@@ -92,14 +92,29 @@ static GamepadInfo g_gamepad[2];
 
 extern Snes *g_snes;
 
+static bool g_sdl_initialized;
+
 void NORETURN Die(const char *error) {
+#ifdef __SWITCH__
+  // SDL's message box is not implemented on Switch and calling into SDL before
+  // SDL_Init (for example when smw_assets.dat is missing) would crash the
+  // whole console. Print to the console screen instead, but only while SDL
+  // has not taken over the display yet.
+  fprintf(stderr, "Error: %s\n", error);
+  if (!g_sdl_initialized)
+    PrintErrorMessageToScreen("Error: %s\n\nPress HOME to exit.", error);
+  exit(1);
+#else
   SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, kWindowTitle, error, NULL);
   fprintf(stderr, "Error: %s\n", error);
   exit(1);
+#endif
 }
 
 void Warning(const char *error) {
+#ifndef __SWITCH__
   SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_WARNING, kWindowTitle, error, NULL);
+#endif
   fprintf(stderr, "Warning: %s\n", error);
 }
 
@@ -261,9 +276,16 @@ static bool SdlRenderer_Init(SDL_Window *window) {
   if (g_config.shader)
     fprintf(stderr, "Warning: Shaders are supported only with the OpenGL backend\n");
 
+  bool software = g_config.output_method == kOutputMethod_SDLSoftware;
   SDL_Renderer *renderer = SDL_CreateRenderer(g_window, -1,
-                                              g_config.output_method == kOutputMethod_SDLSoftware ? SDL_RENDERER_SOFTWARE :
+                                              software ? SDL_RENDERER_SOFTWARE :
                                               SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+  if (renderer == NULL) {
+    // The OpenGL ES renderer can be unavailable (for example when running as
+    // an applet). Fall back to software rendering instead of aborting.
+    fprintf(stderr, "Accelerated renderer unavailable (%s), trying software\n", SDL_GetError());
+    renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
+  }
   if (renderer == NULL) {
     printf("Failed to create renderer: %s\n", SDL_GetError());
     return false;
@@ -297,17 +319,28 @@ static void SdlRenderer_Destroy(void) {
   SDL_DestroyRenderer(g_renderer);
 }
 
+static bool g_texture_locked;
+
 static void SdlRenderer_BeginDraw(int width, int height, uint8 **pixels, int *pitch) {
   g_sdl_renderer_rect.w = width;
   g_sdl_renderer_rect.h = height;
-  if (SDL_LockTexture(g_texture, &g_sdl_renderer_rect, (void **)pixels, pitch) != 0) {
-    printf("Failed to lock texture: %s\n", SDL_GetError());
+  g_texture_locked = false;
+  if (g_texture && SDL_LockTexture(g_texture, &g_sdl_renderer_rect, (void **)pixels, pitch) == 0) {
+    g_texture_locked = true;
     return;
   }
+  // Never hand a NULL buffer to the drawing code: that would crash.
+  printf("Failed to lock texture: %s\n", SDL_GetError());
+  static uint8 kFallbackPixels[256 * 4 * 240];
+  *pixels = kFallbackPixels;
+  *pitch = 256 * 4;
 }
 
 static void SdlRenderer_EndDraw(void) {
   //  uint64 before = SDL_GetPerformanceCounter();
+  if (!g_texture_locked)
+    return;
+  g_texture_locked = false;
   SDL_UnlockTexture(g_texture);
   //  uint64 after = SDL_GetPerformanceCounter();
   //  float v = (double)(after - before) / SDL_GetPerformanceFrequency();
@@ -336,8 +369,16 @@ void MkDir(const char *s) {
 #undef main
 int main(int argc, char** argv) {
 #ifdef __SWITCH__
+  // Launch arguments on Switch are the .nro path or forwarder arguments, not
+  // game options. Reading them as options/roms is what made the game try to
+  // load itself as a rom when launched from hbmenu (applet mode) or from a
+  // forwarder, so they are simply ignored here.
+  (void)argc;
+  (void)argv;
   SwitchImpl_Init();
-#endif
+  const char *config_file = NULL;
+  SwitchDirectory();
+#else
   argc--, argv++;
   const char *config_file = NULL;
   if (argc >= 2 && strcmp(argv[0], "--config") == 0) {
@@ -350,6 +391,7 @@ int main(int argc, char** argv) {
     g_debug_flag = true;
     argc -= 1, argv += 1;
   }
+#endif
   ParseConfigFile(config_file);
 
   LoadAssets();
@@ -389,6 +431,7 @@ int main(int argc, char** argv) {
     printf("Failed to init SDL: %s\n", SDL_GetError());
     return 1;
   }
+  g_sdl_initialized = true;
 
   bool custom_size = g_config.window_width != 0 && g_config.window_height != 0;
   int window_width = custom_size ? g_config.window_width : g_current_window_scale * g_snes_width;
@@ -401,23 +444,26 @@ int main(int argc, char** argv) {
     g_renderer_funcs = kSdlRendererFuncs;
   }
 
+  bool rom_ok = true;
+#ifndef __SWITCH__
+  // On desktop, argv[0] may be a rom passed on the command line. On Switch the
+  // launch arguments are the NRO path (or nothing at all), so never treat them
+  // as a rom: the rom is always taken from the embedded assets.
   if (argv[0]) {
     size_t size;
     kRom = ReadWholeFile(argv[0], &size);
     kRom_SIZE = (uint32)size;
     if (!kRom)
-      goto error_reading;
+      rom_ok = false;
   }
+#endif
 
-  Snes *snes = SnesInit(kRom, kRom_SIZE);
+  Snes *snes = rom_ok ? SnesInit(kRom, kRom_SIZE) : NULL;
   if (snes == NULL) {
-error_reading:;
 #ifdef __SWITCH__
     ThrowMissingROM();
 #else
-    char buf[256];
-    snprintf(buf, sizeof(buf), "unable to load rom");
-    Die(buf);
+    Die("unable to load rom");
 #endif
     return 1;
   }
@@ -454,8 +500,24 @@ error_reading:;
     want.callback = &AudioCallback;
     g_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
     if (g_audio_device == 0) {
+      fprintf(stderr, "Failed to open audio device: %s\n", SDL_GetError());
+#ifdef __SWITCH__
+      // Retry once with settings the Switch audio driver definitely supports.
+      want.freq = 48000;
+      want.samples = 2048;
+      g_audio_device = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+#endif
+    }
+    if (g_audio_device == 0) {
+#ifdef __SWITCH__
+      // Run without sound rather than refusing to start. The APU is still
+      // advanced from the main loop below so the game does not stall on it.
+      fprintf(stderr, "Continuing without audio output\n");
+      have = want;
+#else
       printf("Failed to open audio device: %s\n", SDL_GetError());
       return 1;
+#endif
     }
     g_audio_channels = 2;
     g_frames_per_block = (534 * have.freq) / 32000;
@@ -558,6 +620,11 @@ error_reading:;
     uint32 inputs = g_input_state | g_gamepad[0].axis_buttons | g_gamepad[1].axis_buttons << 12;
     uint8 is_replay = RtlRunFrame(inputs | GetActiveControllers());
 
+    // Without an audio device nothing drives the APU, and the game waits on it
+    // (for example APUI02), so advance it once per frame ourselves.
+    if (g_audio_device == 0 && g_audiobuffer)
+      RtlRenderAudio((int16 *)g_audiobuffer, g_frames_per_block, g_audio_channels);
+
     frameCtr++;
     g_snes->disableRender = (g_turbo ^ (is_replay & g_replay_turbo)) && (frameCtr & (g_turbo ? 0xf : 0x7f)) != 0;
 
@@ -601,8 +668,10 @@ error_reading:;
     HandleCommand(kKeys_Save + 0, true);
 
   // clean sdl
-  SDL_PauseAudioDevice(g_audio_device, 1);
-  SDL_CloseAudioDevice(g_audio_device);
+  if (g_audio_device) {
+    SDL_PauseAudioDevice(g_audio_device, 1);
+    SDL_CloseAudioDevice(g_audio_device);
+  }
   SDL_DestroyMutex(g_audio_mutex);
   free(g_audiobuffer);
 
@@ -897,14 +966,20 @@ static bool VerifyAssetsFile(const uint8 *data, size_t length) {
 }
 
 static const char *kAssetFileCandidates[] = {
+#ifdef __SWITCH__
+  // Prefer the copy embedded in the .nro: it always matches this build, and
+  // it works regardless of the current directory. A stale smw_assets.dat on
+  // the SD card is only used as a fallback.
+  "romfs:/smw_assets.dat",
+#endif
   "smw_assets.dat",
-  "assets/smw_assets.dat"
+  "assets/smw_assets.dat",
 };
 
 static void LoadAssets() {
   size_t length = 0;
   uint8 *data = NULL;
-  for (int i = 0; i < 2 && data == NULL; i++)
+  for (int i = 0; i < countof(kAssetFileCandidates) && data == NULL; i++)
     data = ReadWholeFile(kAssetFileCandidates[i], &length);
 
   if (!data) {

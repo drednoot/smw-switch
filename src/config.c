@@ -484,7 +484,11 @@ void ParseConfigFile(const char *filename) {
   if (filename != NULL || !ParseOneConfigFile("smw.user.ini", 0)) {
     if (filename == NULL)
       filename = "smw.ini";
-    if (!ParseOneConfigFile(filename, 0))
+    if (!ParseOneConfigFile(filename, 0)
+#ifdef __SWITCH__
+        && !ParseOneConfigFile("romfs:/smw.ini", 0)
+#endif
+       )
       fprintf(stderr, "Warning: Unable to read config file %s\n", filename);
   }
   RegisterDefaultKeys();

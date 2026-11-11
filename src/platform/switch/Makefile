@@ -38,11 +38,18 @@ include $(DEVKITPRO)/libnx/switch_rules
 #   NACP building is skipped as well.
 #---------------------------------------------------------------------------------
 SRC_DIR     := ../../
+ROOT_DIR    := $(SRC_DIR)/..
+PYTHON      ?= python3
 TARGET		:=	smw
 BUILD		:=	bin
-SOURCES		:=  $(SRC_DIR) $(SRC_DIR)/snes $(SRC_DIR)/platform/switch/src $(SRC_DIR)/../third_party/gl_core
+ROMFS		:=	romfs
+ROMFS_DIR	:=	$(CURDIR)/$(ROMFS)
+ROMFS_ASSETS	:=	$(ROMFS_DIR)/smw_assets.dat
+ROMFS_INI	:=	$(ROMFS_DIR)/smw.ini
+ASSETS_DAT	:=	$(ROOT_DIR)/smw_assets.dat
+SOURCES		:=  $(SRC_DIR) $(SRC_DIR)/snes $(SRC_DIR)/platform/switch/src $(SRC_DIR)/../third_party/gl_core $(ROOT_DIR)/smb1 $(ROOT_DIR)/smbll
 
-CFILES := $(wildcard $(SRC_DIR)/*.c $(SRC_DIR)/snes/*.c $(SRC_DIR)/platform/switch/src/*.c) $(SRC_DIR)/../third_party/gl_core/gl_core_3_1.c
+CFILES := $(wildcard $(SRC_DIR)/*.c $(SRC_DIR)/snes/*.c $(SRC_DIR)/platform/switch/src/*.c $(ROOT_DIR)/smb1/*.c $(ROOT_DIR)/smbll/*.c) $(SRC_DIR)/../third_party/gl_core/gl_core_3_1.c
 
 INCLUDES	:=	include $(SRC_DIR)/../ ./src/
 APP_TITLE   :=  Super Mario World
@@ -83,9 +90,11 @@ ifneq ($(BUILD),$(notdir $(CURDIR)))
 export OUTPUT	:=	$(CURDIR)/$(TARGET)
 export TOPDIR	:=	$(CURDIR)
 
-export VPATH	:=	$(foreach dir,$(SOURCES),$(CURDIR)/$(dir)) \
-			$(foreach dir,$(DATA),$(CURDIR)/$(dir)) \
-
+# Use absolute source directories for pattern-specific vpath lookups. Do not
+# use the global VPATH: it also makes make look for generated .o files in the
+# source directories, so stale objects from a desktop build can be mistaken
+# for up-to-date Switch objects.
+export SOURCES_ABS := $(foreach dir,$(SOURCES),$(CURDIR)/$(dir))
 
 export DEPSDIR	:=	$(CURDIR)/$(BUILD)
 
@@ -157,11 +166,31 @@ ifneq ($(ROMFS),)
 endif
 
 .PHONY: $(BUILD) clean all
+.DEFAULT_GOAL := all
+
+#---------------------------------------------------------------------------------
+# Build the romfs that gets embedded into the .nro. This makes the build
+# self-contained: smw_assets.dat no longer has to be copied to the SD card
+# next to the .nro, and it also works when the current directory is not the
+# directory containing the .nro (for example when launched through a forwarder).
+#---------------------------------------------------------------------------------
+$(ROMFS_DIR):
+	@mkdir -p $@
+
+$(ROMFS_INI): $(CURDIR)/smw.ini | $(ROMFS_DIR)
+	@cp $< $@
+
+$(ROMFS_ASSETS): $(ASSETS_DAT) | $(ROMFS_DIR)
+	@cp $< $@
+
+$(ASSETS_DAT):
+	@echo "Extracting game resources (smw.sfc is required)"
+	@cd $(ROOT_DIR) && $(PYTHON) assets/restool.py
 
 #---------------------------------------------------------------------------------
 all: $(BUILD)
 
-$(BUILD):
+$(BUILD): $(ROMFS_ASSETS) $(ROMFS_INI)
 	@echo $(CFILES) ...
 	@[ -d $@ ] || mkdir -p $@
 	@$(MAKE) --no-print-directory -C $(BUILD) -f $(CURDIR)/Makefile
@@ -169,6 +198,7 @@ $(BUILD):
 #---------------------------------------------------------------------------------
 clean:
 	@echo clean ...
+	@rm -fr $(ROMFS)
 ifeq ($(strip $(APP_JSON)),)
 	@rm -fr $(BUILD) $(TARGET).nro $(TARGET).nacp $(TARGET).elf
 else
@@ -179,6 +209,11 @@ endif
 #---------------------------------------------------------------------------------
 else
 .PHONY:	all
+
+# Only search for sources, never for generated object files.
+vpath %.c $(SOURCES_ABS)
+vpath %.s $(SOURCES_ABS)
+vpath %.cpp $(SOURCES_ABS)
 
 DEPENDS	:=	$(OFILES:.o=.d)
 

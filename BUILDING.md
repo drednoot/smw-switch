@@ -109,12 +109,19 @@ Dependencies and requirements:
 2. Please download the DevKitPro version of MSYS2 through their installer, as the default MSYS2 causes issues with windows compiling.
 3. Now that you've installed DevKitPro, open up the location you've installed DevKitPro to, then find `mingw64.exe` inside `msys2` located in `devkitPro` folder.
 4. Type `pacman -S git switch-dev switch-sdl2 switch-tools pkg-config` in the terminal to install the `switch-sdl2` library.
-5. CD to `switch` folder by typing `cd src/platform/switch` in the terminal on the `smw` root folder.
-6. type `make` to compile the Switch Port.
-7. Transfer the `.ini`, `nro`, `ncap` and your rom file to the Switch.
+5. Put your unheadered USA rom in the repo root as `smw.sfc`. It is only needed while building: the build extracts `smw_assets.dat` with `assets/restool.py` and embeds it (together with `smw.ini`) into the `.nro` as RomFS.
+6. CD to `switch` folder by typing `cd src/platform/switch` in the terminal on the `smw` root folder.
+7. type `make` to compile the Switch Port. This produces `smw.nro` and `smw.nacp`.
+8. Copy `smw.nro` to the SD card (for example to `sdmc:/switch/smw/smw.nro`). The `.nacp` and `.ini` do not need to be copied: the `.nacp` is only metadata and the ini is read from the embedded RomFS (an `smw.ini` next to the `.nro` still overrides it). The ROM and `smw_assets.dat` are no longer needed on the SD card.
+9. Launch the `.nro` from the Homebrew Menu (album/applet mode and full application mode both work) or from a forwarder.
 
 **OPTIONAL STEP**
 
 ```sh
 make -j$(nproc) # To build using all cores
+make PYTHON=python # If `python3` is not on your PATH (common on Windows/MSYS2)
 ```
+
+The build needs Python only to generate `smw_assets.dat` when it does not
+exist yet. `make clean` also removes the generated RomFS, so a clean build
+regenerates it from `smw.sfc`.
