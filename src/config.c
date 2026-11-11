@@ -480,6 +480,13 @@ static bool ParseOneConfigFile(const char *filename, int depth) {
 void ParseConfigFile(const char *filename) {
   g_config.msuvolume = 100;  // default msu volume, 100%
   g_config.save_playthrough = true;
+#ifdef __SWITCH__
+  // The Switch has no keyboard, so without a gamepad there is no input at all.
+  // Enable both pads by default; an explicit EnableGamepadN in the config can
+  // still turn them off.
+  g_config.enable_gamepad[0] = true;
+  g_config.enable_gamepad[1] = true;
+#endif
 
   if (filename != NULL || !ParseOneConfigFile("smw.user.ini", 0)) {
     if (filename == NULL)
