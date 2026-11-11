@@ -366,6 +366,15 @@ void MkDir(const char *s) {
 #endif
 }
 
+#ifdef __SWITCH__
+// Invoked from the libnx applet hook when the app is backgrounded (HOME menu
+// or sleep), where it may be terminated before the normal shutdown path runs.
+static void SwitchAutosaveCallback(void) {
+  if (g_config.autosave)
+    HandleCommand(kKeys_Save + 0, true);
+}
+#endif
+
 #undef main
 int main(int argc, char** argv) {
 #ifdef __SWITCH__
@@ -532,6 +541,13 @@ int main(int argc, char** argv) {
   MkDir("saves");
     
   RtlReadSram();
+
+#ifdef __SWITCH__
+  // Let the platform layer autosave when the app is sent to the background.
+  // The callback is registered only now that the audio mutex, the game state
+  // and the saves directory all exist.
+  SwitchImpl_SetAutosaveCallback(SwitchAutosaveCallback);
+#endif
 
   for (int i = 0; i < SDL_NumJoysticks(); i++)
     OpenOneGamepad(i);

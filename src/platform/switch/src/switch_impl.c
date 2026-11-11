@@ -17,10 +17,40 @@ static bool DirectoryIsWritable(void) {
     return true;
 }
 
+static SwitchImplAutosaveCallback g_autosave_callback;
+static AppletHookCookie g_applet_hook_cookie;
+
+static void AppletHookCallback(AppletHookType hook, void *param) {
+    (void)param;
+    // Save when the app is sent to the background. HOME/sleep are the last
+    // reliable moments before hbmenu, a forwarder or the system can terminate
+    // the process without letting the main loop finish. (Exit requests while
+    // still in focus are handled by the exit lock and the normal shutdown
+    // path in main().)
+    if (g_autosave_callback != NULL &&
+        hook == AppletHookType_OnFocusState &&
+        appletGetFocusState() == AppletFocusState_Background)
+        g_autosave_callback();
+}
+
+void SwitchImpl_SetAutosaveCallback(SwitchImplAutosaveCallback callback) {
+    g_autosave_callback = callback;
+}
+
 void SwitchImpl_Init() {
+    // Without this, the system force-terminates the process as soon as an exit
+    // request arrives. That skipped the autosave (and other cleanup) at the end
+    // of main(), which is why autosave did not work on Switch. The 15 second
+    // timeout leaves plenty of time to write the snapshot.
+    Result rc = appletLockExit();
+    if (R_FAILED(rc))
+        fprintf(stderr, "appletLockExit failed: 0x%x\n", rc);
+
+    appletHook(&g_applet_hook_cookie, AppletHookCallback, NULL);
+
     // Mount the romfs embedded in the .nro. smw_assets.dat and smw.ini live
     // there so the game works no matter what the current directory is.
-    Result rc = romfsInit();
+    rc = romfsInit();
     if (R_FAILED(rc))
         fprintf(stderr, "romfsInit failed: 0x%x\n", rc);
 
@@ -44,8 +74,14 @@ void SwitchImpl_Init() {
 }
 
 void SwitchImpl_Exit() {
+    appletUnhook(&g_applet_hook_cookie);
+    g_autosave_callback = NULL;
     socketExit();
     romfsExit();
+    // Must be called before main() returns. If an exit was requested this is
+    // where the system is finally allowed to terminate the process, after the
+    // autosave and the rest of the cleanup have completed.
+    appletUnlockExit();
 }
 
 // Prints a message on the console screen. Must only be used before SDL has

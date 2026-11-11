@@ -89,13 +89,27 @@ gcc -fsyntax-only -std=gnu99 -I. -Isrc -Ithird_party $(pkg-config --cflags sdl2)
   `sdmc:/switch/smw` when `envIsNso()` is true or the cwd is not writable.
   Saves and save states are written relative to the cwd (`saves/`).
 * Config resolution order: `smw.user.ini` → `smw.ini` (cwd) →
-  `romfs:/smw.ini`. Asset resolution order on Switch: `romfs:/smw_assets.dat`
+  `romfs:/smw.ini`. A stale `smw.ini` next to the `.nro` therefore overrides
+  the embedded defaults; in particular `Autosave = 0` there disables the
+  Switch autosave. Asset resolution order on Switch: `romfs:/smw_assets.dat`
   → `smw_assets.dat` → `assets/smw_assets.dat`.
 * `romfsInit()` must be called before any asset/config load and `romfsExit()`
   before exit; both happen in `SwitchImpl_Init` / `SwitchImpl_Exit`.
 * SDL's Switch video driver already calls `appletMainLoop()` from
   `SWITCH_PumpEvents`, so the normal SDL loop handles applet exit. Any
   standalone error loop must still poll `appletMainLoop()`.
+* **Autosave needs the exit lock.** `SwitchImpl_Init` calls
+  `appletLockExit()` and `SwitchImpl_Exit` calls `appletUnlockExit()`.
+  Without the lock the system force-terminates the process as soon as an
+  exit request arrives, so the autosave at the end of `main()` never ran.
+  `SwitchImpl_SetAutosaveCallback` (set from `main()` once the game is
+  initialized) additionally saves when the app is backgrounded
+  (`AppletFocusState_Background`, i.e. HOME or sleep), in case hbmenu or a
+  forwarder kills the process without a graceful exit request.
+* `RtlSaveSnapshot` writes `<file>.tmp` and renames it into place (removing
+  the target first on `_WIN32`). This prevents an interrupted save from
+  truncating the previous snapshot; keep the temp+rename when changing the
+  save format.
 * Renderer: the accelerated (GLES2) renderer can be unavailable; the SDL
   renderer falls back to software. `SDL_LockTexture` failures must never hand
   a `NULL` pixel buffer to the PPU drawing code.

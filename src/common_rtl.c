@@ -456,12 +456,35 @@ bool RtlRunFrame(uint32 inputs) {
 }
 
 void RtlSaveSnapshot(const char *filename, bool saving_with_bug) {
-  FILE *f = fopen(filename, "wb");
+  // Write to a temporary file and rename it into place, so a save that is
+  // interrupted (for example when the app is terminated while being
+  // backgrounded) never leaves a truncated snapshot behind.
+  char tmp_name[160];
+  snprintf(tmp_name, sizeof(tmp_name), "%s.tmp", filename);
+  FILE *f = fopen(tmp_name, "wb");
+  if (f == NULL) {
+    fprintf(stderr, "Unable to write %s\n", tmp_name);
+    return;
+  }
   RtlApuLock();
   RtlSaveMusicStateToRam_Locked();
   StateRecorder_Save(&state_recorder, f, saving_with_bug);
   RtlApuUnlock();
-  fclose(f);
+  bool ok = !ferror(f) && fflush(f) == 0;
+  if (fclose(f) != 0)
+    ok = false;
+  if (!ok) {
+    fprintf(stderr, "Unable to finish writing %s\n", tmp_name);
+    remove(tmp_name);
+    return;
+  }
+#ifdef _WIN32
+  remove(filename);
+#endif
+  if (rename(tmp_name, filename) != 0) {
+    fprintf(stderr, "Unable to replace %s\n", filename);
+    remove(tmp_name);
+  }
 }
 
 static void RtlLoadFromFile(FILE *f, bool replay) {
